@@ -30,10 +30,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
-      # Trusted publishing requires npm >= 11.5.1 — newer than the runner's bundled npm.
-      - run: npm install -g npm@latest
+      # Trusted publishing needs npm >= 11.5.1. Pin to the 11.x line: it supports OIDC
+      # publishing and stays compatible with the runner's Node (npm@latest/12 requires Node >=22.22).
+      - run: npm install -g npm@11
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
