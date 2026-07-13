@@ -1,0 +1,52 @@
+{
+  "name": "@triggair/sdk",
+  "version": "0.1.0",
+  "description": "The one-import browser client for the Triggair game backend — typed, anonymous-first, offline-resilient.",
+  "license": "MIT",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "module": "./dist/index.js",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "SKILL.md", "LICENSE"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "triggair",
+    "game-backend",
+    "backend-as-a-service",
+    "leaderboards",
+    "cloud-saves",
+    "game-economy",
+    "multiplayer",
+    "browser-games",
+    "gamedev",
+    "html5-games"
+  ],
+  "homepage": "https://triggair.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/triggair/triggair-js-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/triggair/triggair-js-sdk/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
