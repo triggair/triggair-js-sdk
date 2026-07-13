@@ -1,0 +1,51 @@
+name: Publish to npm
+
+# Trusted publishing (OIDC) — NO long-lived npm token is stored in this repo. npm
+# exchanges the workflow's short-lived GitHub OIDC identity for a one-time publish
+# credential and attaches signed build provenance automatically.
+#
+# One-time setup on npmjs.com (package must already exist first):
+#   @triggair/sdk → Settings → Trusted Publisher → Add → GitHub Actions
+#     Organization or user: triggair
+#     Repository:           triggair-js-sdk
+#     Workflow filename:    release.yml      (this file)
+#     Environment:          (leave blank, unless you add one below)
+#
+# Cut a release: bump the version in package.json, commit, then publish a GitHub
+# Release whose tag is `v<version>` (e.g. v0.1.1). This workflow does the rest.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # REQUIRED: lets npm verify the OIDC identity + sign provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      # Trusted publishing requires npm >= 11.5.1 — newer than the runner's bundled npm.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # On a Release, require the tag (v<x.y.z>) to match package.json — no silent mismatches.
+      - name: Verify version matches release tag
+        if: github.event_name == 'release'
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::Release tag '$TAG' does not match package.json version '$PKG'"
+            exit 1
+          fi
+      # prepublishOnly builds dist/. --provenance emits the signed attestation (needs id-token: write).
+      - run: npm publish --access public --provenance
