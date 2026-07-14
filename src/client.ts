@@ -14,6 +14,7 @@ import { crashes } from "./domains/crashes";
 import type { Ctx } from "./domains/ctx";
 import { daily } from "./domains/daily";
 import { economy } from "./domains/economy";
+import { experiments } from "./domains/experiments";
 import { flags } from "./domains/flags";
 import { inbox } from "./domains/inbox";
 import { keyedBoards } from "./domains/keyed-boards";
@@ -22,6 +23,7 @@ import { leagues } from "./domains/leagues";
 import { moderation } from "./domains/moderation";
 import { players } from "./domains/players";
 import { progression } from "./domains/progression";
+import { push } from "./domains/push";
 import { quests } from "./domains/quests";
 import { type WSCtor, realtime } from "./domains/realtime";
 import { saves } from "./domains/saves";
@@ -120,6 +122,8 @@ export function createClient(options: ClientOptions) {
     crashes: crashes(ctx),
     config: config(ctx),
     flags: flags(ctx),
+    experiments: experiments(ctx),
+    push: push(ctx),
     segments: segments(ctx),
     codes: codes(ctx),
     quests: quests(ctx),

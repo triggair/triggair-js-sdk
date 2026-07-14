@@ -355,16 +355,27 @@ Authenticated WebSocket broadcast rooms: presence + message fan-out (client-auth
 no server simulation).
 - `join(room)` → resolves a `RoomConnection` once the server welcome arrives.
 
+- `join(room)` → resolves a `RoomConnection` once the server welcome arrives. Scoped names
+  gate at connect: `team:<id>` (member-only), `match:<id>` (participant-only); any other name is public.
+
 `RoomConnection`:
 - `you: string`, `members: string[]`, `history: RoomMessage[]` (readonly)
 - `on(event, handler) => unsubscribe` — events: `'message'` → `{ from, data, ts }`;
-  `'presence'` → `{ event:"join"|"leave", player, members }`; `'close'` → `{ code? }`; `'error'` → `{ message }`
-- `send(data): void` — broadcast · `close(): void`
+  `'presence'` → `{ event:"join"|"leave", player, members }`; `'typing'` → `{ player, state }`;
+  `'reconnecting'` → `{ attempt }`; `'reconnected'` → `{}`; `'close'` → `{ code? }`; `'error'` → `{ message }`
+- `send(data): void` — broadcast · `typing(state: boolean): void` — ephemeral indicator · `close(): void`
+
+**Self-healing**: an unexpected drop auto-reconnects (capped backoff), re-joins, and re-welcomes
+(roster + history replay) — emitting `reconnecting` then `reconnected`; a silent heartbeat holds
+idle sockets open. Chat is moderated in transit (mask/block). History size is per-game
+(`triggair_configure_realtime`, 0 = opt-out).
 
 ```ts
 const room = await tg.realtime.join("arena-1");
 room.on("message", ({ from, data }) => moveGhost(from, data));
 room.on("presence", ({ event, player }) => event === "leave" && removeGhost(player));
+room.on("reconnecting", ({ attempt }) => setStatus(`reconnecting… ${attempt}`));
+room.on("reconnected", () => setStatus("live"));
 const id = setInterval(() => room.send({ x: p.x / W, y: p.y / H }), 80); // ~12 Hz
 // teardown: clearInterval(id); room.close();
 ```
@@ -395,6 +406,33 @@ const cfg = await tg.config.get();
 const mult = cfg.scrip_multiplier ?? 1;                 // live-tunable, no redeploy
 if (await tg.flags.bool("new_arena_enabled")) enableArena(); else showClassic();
 ```
+
+### A/B experiments — `tg.experiments` (player)
+- `assign(key)` → `{ key, variant, in_experiment }` — deterministic + **sticky** server-side bucketing (same player → same variant, across sessions/devices, stable across anon→named). **Fail-safe**: unknown / not-running / not-targeted → `{ variant: null, in_experiment: false }` (treat as control). The first assign logs the exposure once.
+- `track(key, metric?)` → `{ ok, counted }` — records the enrolled player's first conversion; `metric` names the goal (counts when it matches the experiment's measured metric).
+
+```ts
+const { variant } = await tg.experiments.assign("checkout_cta");
+if (variant === "green") showGreen(); else showDefault();   // null ⇒ control
+await tg.experiments.track("checkout_cta", "purchase");     // on conversion
+```
+Author experiments (variants + weights + metric + optional target segment) in the dashboard
+(Operations → LiveOps) or via MCP; only a `running` experiment assigns. Per-variant
+exposures/conversions/rate are on the results view — mind sample size before calling a winner.
+
+### Web push — `tg.push` (pk + player)
+- `vapidKey()` → the game's VAPID public key (pk).
+- `subscribe(registration?)` → registers the browser's PushSubscription server-side (needs a service worker; uses `navigator.serviceWorker.ready` if you don't pass one). **Refused for minors** by the `behavioral_push` compliance gate — screen age first.
+- `unsubscribe(registration?)` → removes it server-side + in the browser.
+
+```ts
+await navigator.serviceWorker.register("/sw.js");
+await tg.push.subscribe();   // throws age_restricted/parental_consent_required for minors
+// SW: self.addEventListener('push', e => { const n = e.data.json();
+//   self.registration.showNotification(n.title, { body: n.body, data: n }); });
+```
+Sending is a dashboard/MCP action (`triggair_send_push` → all / a segment / one player); the
+game only subscribes. Self-hosted VAPID (no vendor); dead subscriptions are pruned on send.
 
 ### Deterministic RNG — `tg.rng` (pk; `scope:"player"` = player)
 - `seed(stream, { period?: "daily"|"weekly"|"all_time", scope?: "shared"|"player" })` → `{ stream, period, period_key, scope, seed }`
@@ -532,6 +570,8 @@ Transport-level `code`s: `bad_request`, `unauthorized`, `forbidden`, `cors_forbi
 | --- | --- |
 | Runtime player calls: submit/read/claim/buy/report/join/… | Definitions: boards, currencies, items, stores, loot tables, energy meters |
 | Reading config/flags/segments | Authoring config, flags, segments, live events |
+| `experiments.assign`/`track` (A/B) | Experiment definitions (variants, weights, metric) + results |
+| `push.subscribe`/`unsubscribe` | Sending push (to all / a segment / a player) |
 | Reporting achievement/quest progress | Achievement/quest/battle-pass/season/tournament definitions |
 | `moderation.check`, `compliance.setAge/status` | Moderation policy, custom term lists, age-gate policy |
 | — | Keys (pk/sk), CORS allowlist (allowed_origins), `triggair_verify_integration` |
