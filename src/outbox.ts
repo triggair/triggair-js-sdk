@@ -119,7 +119,13 @@ export function createOutbox(o: {
   }
 
   function start(): void {
-    if (o.intervalMs && o.intervalMs > 0) timer = setInterval(() => void flush(), o.intervalMs);
+    if (o.intervalMs && o.intervalMs > 0) {
+      timer = setInterval(() => void flush(), o.intervalMs);
+      // In Node, unref the background flush timer so it never keeps the process
+      // alive (a scripted `await tg.login(); …` should exit on its own). Browser
+      // timers have no unref, so the optional call no-ops there.
+      (timer as unknown as { unref?: () => void }).unref?.();
+    }
     globalThis.addEventListener?.("online", () => void flush());
   }
   function stop(): void {

@@ -41,6 +41,20 @@ const tg = createClient({ key: "tg_pk_your_key" });
 const { playerId } = await tg.login();
 ```
 
+**No build step? Import from a CDN.** Single-file HTML games and anything without a
+bundler can import the ESM build straight from a CDN, no npm and no build step:
+
+```html
+<script type="module">
+  // Pin a version: @1 tracks the 1.x major, @1.0.2 is exact.
+  import { createClient } from "https://esm.sh/@triggair/sdk@1";
+  const tg = createClient({ key: "tg_pk_your_key" });
+  await tg.login();
+</script>
+```
+
+Everything in this document is identical whether you installed via npm or a CDN. (`unpkg.com/@triggair/sdk@1/dist/index.js` also works.)
+
 `createClient` needs only `key`. Other options (all optional, mostly for SSR/tests):
 `apiBase` (defaults to `https://api.triggair.com`), `storage` (KV; defaults to
 `localStorage` → in-memory), `fetch`, `flushIntervalMs` (outbox timer, default 15 s;
@@ -111,8 +125,14 @@ secret key, stop and get the publishable one from the dashboard.
 
 10. **The "works locally, 403s in prod" trap.** Browser calls are CORS-checked. If a call
     fails only once deployed, add your deployed origin to the game's **allowed_origins**
-    (dashboard → game → CORS allowlist). A `cors_forbidden` / `network` error with that hint
-    means exactly this.
+    (dashboard → game → CORS allowlist, or `PATCH /v1/dev/games/{id}` / the
+    `triggair_set_allowed_origins` MCP tool). Important: a denied CORS response carries no
+    `Access-Control-Allow-Origin` header, so the browser surfaces it only as a generic
+    `TypeError: Failed to fetch` (the devtools console says "CORS policy") — the JSON
+    `cors_forbidden` hint is **unreadable from JS**. So a bare "Failed to fetch" from a
+    deployed or tunnelled URL, when localhost works, is almost always a missing origin. For
+    ephemeral tunnel/preview subdomains, allowlist a wildcard: `https://*.ngrok-free.app`,
+    `https://*.vercel.app`, etc. (a single leading `*.` label; the apex is not included).
 
 ---
 
@@ -144,6 +164,13 @@ secret key, stop and get the publishable one from the dashboard.
 integration end-to-end (keys, CORS, a real round-trip). Locally, a quick smoke test:
 `await tg.login(); await tg.leaderboards.submit("smoke", 1); await tg.leaderboards.top("smoke");`.
 
+**Clean up test data.** Verification and exploratory submits land on the same live boards
+players see. Wipe a board's scores (keeping its config) with the `triggair_reset_leaderboard`
+MCP tool, or `POST /v1/dev/games/{id}/leaderboards/{board}/reset`, so nothing test-related
+lingers. Testing in Node is first-class: `createClient` auto-falls-back to in-memory storage
+when there is no `localStorage`, and its internal flush timer is `unref`'d, so a scripted
+`await tg.login(); …` exits on its own.
+
 ---
 
 ## Top-level client API
@@ -172,6 +199,13 @@ player token (auto-minted). Mixed groups note it per method.
 - `me()` → `{ id, created_at, display_name }`
 - `updateProfile({ display_name?, handle?, avatar_seed? })` → public profile
 - `lookup(handle)` / `profile(id)` → `{ id, display_name, handle, avatar_seed, created_at, stats: {key,value,updated_at}[] }` (pk)
+
+**`display_name` vs `handle`.** `display_name` is the name shown on leaderboards and
+profiles (it is the `display_name` field of a `BoardEntry`). `handle` is a *separate*,
+**unique, lowercased** `@mention`-style id for lookups (`lookup(handle)`); it is not the
+board name. So `updateProfile({ handle })` alone leaves `display_name` null and boards show
+no name — set `display_name` for the visible name. A taken handle throws `handle_taken`; a
+handle is lowercased and must be 3+ chars of `a–z 0–9 _`.
 
 ```ts
 const me = await tg.players.me();
