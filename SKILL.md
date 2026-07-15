@@ -101,12 +101,13 @@ secret key, stop and get the publishable one from the dashboard.
    them. Shared "same board for everyone today" randomness comes from `tg.rng.seed(...)` whose
    secret never leaves the server.
 
-9. **Runtime is the SDK; definitions are the dashboard/MCP.** The SDK is the *player-facing
-   runtime*. The *definitions* it reads — which boards/currencies/stores/items/loot tables/
-   flags/quests/achievements/seasons/tournaments exist, moderation & age-gate policy — are
-   authored in the Triggair **dashboard** or via the **MCP server** (`mcp.triggair.com`,
-   `triggair_*` tools). If a call 404s on an unknown key, the definition hasn't been created
-   yet.
+9. **Runtime is the SDK; definitions are created via the dashboard, the developer API, or MCP.**
+   The SDK is the player-facing runtime. The definitions it reads (which boards, currencies,
+   stores, items, loot tables, flags, quests, achievements, seasons, and tournaments exist, plus
+   moderation and age-gate policy) are authored in the Triggair dashboard, the developer REST API
+   (`/v1/dev/*`, developer session JWT), or the MCP server (`triggair_*` tools). An agent can
+   create them itself, with no human in the dashboard, using the `Configuring the game` section
+   below. If a call 404s on an unknown key, the definition has not been created yet.
 
 10. **The "works locally, 403s in prod" trap.** Browser calls are CORS-checked. If a call
     fails only once deployed, add your deployed origin to the game's **allowed_origins**
@@ -564,9 +565,135 @@ Transport-level `code`s: `bad_request`, `unauthorized`, `forbidden`, `cors_forbi
 
 ---
 
+## Without the SDK: the raw REST API
+
+The SDK is a typed convenience wrapper. The whole backend is a plain HTTPS/JSON API at
+`https://api.triggair.com`, so you can integrate a game (or a non-JS client, a server, or a test)
+with raw requests. Every SDK method maps to exactly one endpoint.
+
+**Auth.** Send the publishable key on every request; add a player token for player-scoped calls.
+
+```
+X-Triggair-Key: tg_pk_your_key            # every request
+Authorization: Bearer <player token>      # player-scoped calls only
+```
+
+Mint a player token (this is what `tg.login()` does):
+
+```bash
+curl -X POST https://api.triggair.com/v1/players/anonymous \
+  -H 'X-Triggair-Key: tg_pk_your_key' -H 'content-type: application/json' \
+  -d '{"device_id":"a-stable-uuid-you-keep"}'
+# -> { "player_id": "p_1a2b3c", "token": "eyJ…", "expires_in": 86400 }
+```
+
+**Method-to-endpoint mapping.** The SDK call and the REST call are the same operation:
+
+| SDK | REST | Auth |
+| --- | --- | --- |
+| `tg.leaderboards.submit('high', 9000)` | `POST /v1/leaderboards/high/scores` `{ "score": 9000 }` | player |
+| `tg.leaderboards.top('high', { limit: 10 })` | `GET /v1/leaderboards/high/top?limit=10` | pk |
+| `tg.saves.put('slot1', data)` | `PUT /v1/saves/slot1` `{ "data": … }` | player |
+| `tg.economy.buy('main_store', 'l_1')` | `POST /v1/economy/stores/main_store/buy` `{ "listing_id": "l_1" }` | player |
+
+The full route table with request/response examples is **/openapi.json** (OpenAPI 3.1) and
+**/docs/api**.
+
+**Errors (same envelope everywhere).** Failures return the matching HTTP status and a JSON body:
+
+```json
+{ "error": { "code": "insufficient_funds", "message": "…", "agent_hint": "…how to fix…", "doc": "https://triggair.com/docs/errors/insufficient_funds", "request_id": "req_…" } }
+```
+
+Read `agent_hint`. Retry `429`, `5xx`, and network errors with backoff; do not retry the
+semantic ones. (The SDK surfaces these same fields on `TriggairError` as `agentHint` /
+`requestId`.)
+
+---
+
+## Configuring the game (developer API + MCP)
+
+Every keyed feature above needs a server-side **definition** first: the boards, currencies,
+items, stores, loot tables, energy meters, flags, segments, quests, achievements, seasons,
+tournaments, and leagues that exist, plus config and moderation/age-gate policy. A human can
+author these in the dashboard, **but an agent can create and change them programmatically** over
+the developer API or the MCP tools. No client redeploy is needed to change a definition.
+
+**Auth for management is a developer credential, not a game key.** Send it as
+`Authorization: Bearer <token>`. Two options:
+
+- A **personal access token** (`tg_pat_…`) — the API credential for agents and CI. Full parity with
+  a dashboard session (create games, configure any of your games, billing), so treat it like a
+  password. Mint one at app.triggair.com (Settings > Access tokens), or over REST with a session:
+  `POST /v1/dev/tokens { "name": "ci-bot" }` returns the token once; `DELETE /v1/dev/tokens/{id}`
+  revokes it.
+- Your **dashboard session JWT** (what the browser uses).
+
+The game keys `tg_pk_` / `tg_sk_` are game-scoped and do **not** authenticate this API. The same PAT
+or session also authenticates the MCP server.
+
+**Bootstrap a game over REST** (`/v1/dev/*`):
+
+```bash
+# 1) create a game -> returns its id
+curl -X POST https://api.triggair.com/v1/dev/games \
+  -H 'authorization: Bearer tg_pat_your_token' -H 'content-type: application/json' \
+  -d '{"name":"Neon Drift"}'              # -> { "id": "g_1", "env": "prod", … }
+
+# 2) issue a publishable key for the client (full secret shown once)
+curl -X POST https://api.triggair.com/v1/dev/games/g_1/keys \
+  -H 'authorization: Bearer tg_pat_your_token' -H 'content-type: application/json' \
+  -d '{"kind":"publishable"}'             # -> { "key": "tg_pk_…full-shown-once" }
+
+# 3) allow your site's origin (CORS), or browser calls 403 in prod
+curl -X PATCH https://api.triggair.com/v1/dev/games/g_1 \
+  -H 'authorization: Bearer tg_pat_your_token' -H 'content-type: application/json' \
+  -d '{"allowed_origins":["https://mygame.com"]}'
+```
+
+**Create definitions** (all under `/v1/dev/games/{id}/…` with the developer JWT). This is the same
+surface a human would otherwise click through:
+
+```
+PUT  /v1/dev/games/g_1/leaderboards/high_scores
+     { "aggregation": "best", "period": "weekly", "higher_is_better": true }
+
+POST /v1/dev/games/g_1/economy/currencies  { "code": "gold", "name": "Gold" }
+POST /v1/dev/games/g_1/economy/items       { "key": "sword", "name": "Sword", "stackable": false }
+POST /v1/dev/games/g_1/economy/stores      { "key": "main_store",
+       "listings": [{ "id": "l_1", "item": "sword", "price": { "gold": 100 } }] }
+POST /v1/dev/games/g_1/economy/loot        { "key": "bronze_box", "drops": [ … ] }
+
+POST /v1/dev/games/g_1/liveops/flags       { "key": "new_hud", "type": "boolean", "default_value": true, "safe_value": false }
+PUT  /v1/dev/games/g_1/config              { "config": { "spawn_rate": 1.5 } }
+```
+
+The complete admin catalog (achievements, quests, battle-pass, progression, tournaments, leagues,
+segments, code campaigns, moderation and compliance policy, operator grants, usage) is the
+`developer`-auth routes in **/openapi.json** and **/docs/api**.
+
+**Or use MCP (the smoothest path for an agent).** Point any MCP client at `POST /v1/mcp` with a
+`tg_pat_` token (or a dashboard session) as the bearer credential. It exposes about 66 `triggair_*`
+tools that wrap the same operations with
+typed inputs, so you can configure a game conversationally: `triggair_create_game`,
+`triggair_rotate_key`, `triggair_set_allowed_origins`, `triggair_configure_leaderboard`,
+`triggair_configure_currencies`, `triggair_configure_items`, `triggair_configure_store`,
+`triggair_configure_loot`, `triggair_configure_energy`, `triggair_configure_achievements`,
+`triggair_configure_quests`, `triggair_configure_season`, `triggair_configure_progression`,
+`triggair_configure_league`, `triggair_create_tournament`, `triggair_configure_moderation`,
+`triggair_configure_compliance`, `triggair_set_config`, `triggair_define_segment`,
+`triggair_send_push`, `triggair_grant_economy`, and more. Run `triggair_verify_integration` when
+done to confirm the game end-to-end.
+
+---
+
 ## What's in the SDK vs the dashboard/MCP
 
-| In the game (this SDK) | In the dashboard / MCP (`triggair_*`) |
+Everything in the right column below is authored server-side. A human can do it in the dashboard,
+and **an agent can do the exact same thing** over the developer API (`/v1/dev/*`) or the MCP
+`triggair_*` tools (see the section above).
+
+| In the game (this SDK) | Server-side setup (dashboard, developer API, or MCP) |
 | --- | --- |
 | Runtime player calls: submit/read/claim/buy/report/join/… | Definitions: boards, currencies, items, stores, loot tables, energy meters |
 | Reading config/flags/segments | Authoring config, flags, segments, live events |
@@ -574,7 +701,7 @@ Transport-level `code`s: `bad_request`, `unauthorized`, `forbidden`, `cors_forbi
 | `push.subscribe`/`unsubscribe` | Sending push (to all / a segment / a player) |
 | Reporting achievement/quest progress | Achievement/quest/battle-pass/season/tournament definitions |
 | `moderation.check`, `compliance.setAge/status` | Moderation policy, custom term lists, age-gate policy |
-| — | Keys (pk/sk), CORS allowlist (allowed_origins), `triggair_verify_integration` |
+| None (developer-only) | Keys (pk/sk), CORS allowlist (allowed_origins), `triggair_verify_integration` |
 
 ## Quick checklist
 
