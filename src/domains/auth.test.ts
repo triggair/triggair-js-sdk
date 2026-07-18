@@ -83,6 +83,37 @@ describe("tg.auth (player accounts)", () => {
     expect(await make(s).auth.signUp("a@b.com", "pw123456")).toEqual({ needsConfirmation: true });
   });
 
+  it("signUp defaults the confirm-link redirect to the current game page", async () => {
+    const g = globalThis as { location?: unknown };
+    const saved = g.location;
+    g.location = { origin: "https://game.example", pathname: "/play/" };
+    try {
+      const s = server();
+      await make(s).auth.signUp("a@b.com", "pw123456");
+      const call = s.calls.find((c) => c.url.startsWith("/auth/v1/signup"));
+      expect(call?.url).toBe(
+        `/auth/v1/signup?redirect_to=${encodeURIComponent("https://game.example/play/")}`,
+      );
+    } finally {
+      g.location = saved;
+    }
+  });
+
+  it("signUp honours an explicit emailRedirectTo, and reset carries redirect_to too", async () => {
+    const s = server();
+    const tg = make(s);
+    await tg.auth.signUp("a@b.com", "pw123456", {
+      emailRedirectTo: "https://game.example/welcome",
+    });
+    expect(s.calls.find((c) => c.url.startsWith("/auth/v1/signup"))?.url).toBe(
+      `/auth/v1/signup?redirect_to=${encodeURIComponent("https://game.example/welcome")}`,
+    );
+    await tg.auth.sendPasswordReset("a@b.com", { emailRedirectTo: "https://game.example/reset" });
+    expect(s.calls.find((c) => c.url.startsWith("/auth/v1/recover"))?.url).toBe(
+      `/auth/v1/recover?redirect_to=${encodeURIComponent("https://game.example/reset")}`,
+    );
+  });
+
   it("signInWithPassword exchanges the session with a Supabase bearer and adopts the player", async () => {
     const s = server({ sessionOutcome: "linked" });
     const tg = make(s);

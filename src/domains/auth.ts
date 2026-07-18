@@ -83,6 +83,16 @@ export function createAuthApi(o: {
     else o.storage.remove(`${ns}sb`);
   }
 
+  // Where GoTrue should send the player after they click a confirm/reset link. Without this the link
+  // lands on the players project's site_url (triggair.com) instead of the game. Defaults to the
+  // current game page; an explicit value must be in the players project's uri_allow_list or GoTrue
+  // ignores it and falls back to site_url (so a non-allowlisted dev origin is no worse than before).
+  function emailRedirectQuery(opts?: { emailRedirectTo?: string }): string {
+    const loc = (globalThis as { location?: { origin: string; pathname: string } }).location;
+    const to = opts?.emailRedirectTo ?? (loc ? `${loc.origin}${loc.pathname}` : undefined);
+    return to ? `?redirect_to=${encodeURIComponent(to)}` : "";
+  }
+
   // A GoTrue call against the triggair-players project (apikey = its public anon key).
   async function goTrue<T>(path: string, body: unknown, accessToken?: string): Promise<T> {
     const c = await config();
@@ -181,9 +191,18 @@ export function createAuthApi(o: {
         return null;
       }
     },
-    /** Register email/password. With email confirmation on (default), returns { needsConfirmation }. */
-    signUp: async (email: string, password: string): Promise<{ needsConfirmation: boolean }> => {
-      const r = await goTrue<{ access_token?: string }>("/auth/v1/signup", { email, password });
+    /** Register email/password. With email confirmation on (default), returns { needsConfirmation };
+     *  the confirmation link returns the player to `emailRedirectTo` (defaults to the current game
+     *  page) — it must be in the game's allowlisted origins, else it falls back to triggair.com. */
+    signUp: async (
+      email: string,
+      password: string,
+      opts?: { emailRedirectTo?: string },
+    ): Promise<{ needsConfirmation: boolean }> => {
+      const r = await goTrue<{ access_token?: string }>(
+        `/auth/v1/signup${emailRedirectQuery(opts)}`,
+        { email, password },
+      );
       return { needsConfirmation: !r.access_token };
     },
     /** Sign in with email/password and exchange for a player token. */
@@ -244,9 +263,13 @@ export function createAuthApi(o: {
       popup.close();
       return r;
     },
-    /** Email a password-reset link. */
-    sendPasswordReset: async (email: string): Promise<void> => {
-      await goTrue("/auth/v1/recover", { email });
+    /** Email a password-reset link. `emailRedirectTo` (default: the current game page) is where the
+     *  link lands; it must be in the game's allowlisted origins, else it falls back to triggair.com. */
+    sendPasswordReset: async (
+      email: string,
+      opts?: { emailRedirectTo?: string },
+    ): Promise<void> => {
+      await goTrue(`/auth/v1/recover${emailRedirectQuery(opts)}`, { email });
     },
     /** Resolve a login conflict: keep the account's data, or replace it with the anonymous progress. */
     resolveMerge: async (
