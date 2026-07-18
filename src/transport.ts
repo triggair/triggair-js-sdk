@@ -17,6 +17,9 @@ export interface RequestSpec {
   query?: Record<string, string | number | undefined> | undefined;
   body?: unknown;
   auth?: AuthMode | undefined;
+  /** Explicit Authorization bearer, overriding the player-token provider — used by the account
+   *  session-exchange (BE-18), which carries the pk AND a Supabase session JWT. */
+  bearer?: string | undefined;
   ifMatch?: number | undefined;
   idempotencyKey?: string | undefined;
   signal?: AbortSignal | undefined;
@@ -51,7 +54,9 @@ export function createTransport(o: TransportOptions) {
     if (spec.body !== undefined) h.set("Content-Type", "application/json");
     if (spec.ifMatch !== undefined) h.set("If-Match", `"${spec.ifMatch}"`);
     if (spec.idempotencyKey) h.set("Idempotency-Key", spec.idempotencyKey);
-    if (spec.auth === "player" && o.tokenProvider) {
+    if (spec.bearer) {
+      h.set("Authorization", `Bearer ${spec.bearer}`);
+    } else if (spec.auth === "player" && o.tokenProvider) {
       const t = await o.tokenProvider.token();
       if (t) h.set("Authorization", `Bearer ${t}`);
     }

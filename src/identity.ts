@@ -40,6 +40,10 @@ export function createAuth(o: {
   const margin = (o.marginSec ?? 60) * 1000;
   let mem = load();
   let inflight: Promise<string> | null = null;
+  // When set (by tg.auth after an account login), a token (re)mint re-exchanges the account session
+  // instead of minting an anonymous player — so a logged-in player survives the 24h token expiry / a
+  // 401 without silently reverting to anonymous. Cleared on logout.
+  let reexchange: (() => Promise<Minted>) | null = null;
 
   function load(): Cached | null {
     try {
@@ -63,6 +67,7 @@ export function createAuth(o: {
     return d;
   }
   async function mint(): Promise<string> {
+    if (reexchange) return persist(await reexchange());
     const m = await o.request<Minted>({
       method: "POST",
       path: "/v1/players/anonymous",
@@ -116,12 +121,31 @@ export function createAuth(o: {
       persist(m);
       return { playerId: m.player_id };
     },
-    /** Drop the cached token (keeps the device identity). */
+    /** Drop the cached token + any account re-exchange (keeps the device identity). */
     logout: (): void => {
       mem = null;
+      reexchange = null;
       o.storage.remove(`${ns}token`);
+    },
+    /** The current opaque device id (sent to the account session-exchange). */
+    deviceId,
+    /** Persist a session minted elsewhere (the account session-exchange). */
+    adopt: (m: Minted): string => persist(m),
+    /** Point token minting at an account re-exchange (or back to anonymous with null). */
+    setReexchange: (fn: (() => Promise<Minted>) | null): void => {
+      reexchange = fn;
+    },
+    /** New device identity → the next token() mints a fresh anonymous player (account signOut). */
+    rotateDevice: (): void => {
+      mem = null;
+      reexchange = null;
+      o.storage.remove(`${ns}token`);
+      o.storage.set(`${ns}device`, randomId(16));
     },
   };
 }
+
+/** The shape the account session-exchange returns to identity.adopt / reexchange. */
+export type { Minted };
 
 export type Auth = ReturnType<typeof createAuth>;

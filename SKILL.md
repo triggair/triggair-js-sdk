@@ -204,8 +204,8 @@ player token (auto-minted). Mixed groups note it per method.
 profiles (it is the `display_name` field of a `BoardEntry`). `handle` is a *separate*,
 **unique, lowercased** `@mention`-style id for lookups (`lookup(handle)`); it is not the
 board name. So `updateProfile({ handle })` alone leaves `display_name` null and boards show
-no name — set `display_name` for the visible name. A taken handle throws `handle_taken`; a
-handle is lowercased and must be 3+ chars of `a–z 0–9 _`.
+no name — set `display_name` for the visible name. A taken handle throws `conflict`; a
+handle is lowercased and must be 3–20 chars of `a–z 0–9 _`.
 
 ```ts
 const me = await tg.players.me();
@@ -627,8 +627,8 @@ curl -X POST https://api.triggair.com/v1/players/anonymous \
 | --- | --- | --- |
 | `tg.leaderboards.submit('high', 9000)` | `POST /v1/leaderboards/high/scores` `{ "score": 9000 }` | player |
 | `tg.leaderboards.top('high', { limit: 10 })` | `GET /v1/leaderboards/high/top?limit=10` | pk |
-| `tg.saves.put('slot1', data)` | `PUT /v1/saves/slot1` `{ "data": … }` | player |
-| `tg.economy.buy('main_store', 'l_1')` | `POST /v1/economy/stores/main_store/buy` `{ "listing_id": "l_1" }` | player |
+| `tg.saves.put('slot1', data)` | `PUT /v1/saves/slot1` with the save blob AS the body (e.g. `{ "level": 12 }`, not wrapped in `data`) | player |
+| `tg.economy.buy('main_store', 'l_1')` | `POST /v1/stores/main_store/buy` `{ "listing_id": "l_1", "idempotency_key": "<uuid>" }` | player |
 
 The full route table with request/response examples is **/openapi.json** (OpenAPI 3.1) and
 **/docs/api**.
@@ -689,17 +689,22 @@ curl -X PATCH https://api.triggair.com/v1/dev/games/g_1 \
 surface a human would otherwise click through:
 
 ```
+# boards always keep the best score; there is no aggregation field
 PUT  /v1/dev/games/g_1/leaderboards/high_scores
-     { "aggregation": "best", "period": "weekly", "higher_is_better": true }
+     { "period": "weekly", "higher_is_better": true }
 
-POST /v1/dev/games/g_1/economy/currencies  { "code": "gold", "name": "Gold" }
-POST /v1/dev/games/g_1/economy/items       { "key": "sword", "name": "Sword", "stackable": false }
-POST /v1/dev/games/g_1/economy/stores      { "key": "main_store",
-       "listings": [{ "id": "l_1", "item": "sword", "price": { "gold": 100 } }] }
-POST /v1/dev/games/g_1/economy/loot        { "key": "bronze_box", "drops": [ … ] }
+# each economy POST takes a wrapper array; item/store ids use `item_id`, prices are a list
+POST /v1/dev/games/g_1/economy/currencies  { "currencies": [{ "code": "gold", "name": "Gold" }] }
+POST /v1/dev/games/g_1/economy/items       { "items": [{ "item_id": "sword", "name": "Sword", "stackable": false }] }
+POST /v1/dev/games/g_1/economy/stores      { "key": "main_store", "name": "Main Store",
+       "listings": [{ "item_id": "sword", "price": [{ "currency": "gold", "amount": 100 }] }] }
+# loot uses `entries`; enabling requires compliance_ack:true (you own loot legality)
+POST /v1/dev/games/g_1/economy/loot        { "key": "bronze_box", "compliance_ack": true, "enabled": true,
+       "entries": [{ "item_id": "coin", "weight": 1 }] }
 
 POST /v1/dev/games/g_1/liveops/flags       { "key": "new_hud", "type": "boolean", "default_value": true, "safe_value": false }
-PUT  /v1/dev/games/g_1/config              { "config": { "spawn_rate": 1.5 } }
+# the config blob IS the body (not wrapped in `config`)
+PUT  /v1/dev/games/g_1/config              { "spawn_rate": 1.5 }
 ```
 
 The complete admin catalog (achievements, quests, battle-pass, progression, tournaments, leagues,

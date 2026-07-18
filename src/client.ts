@@ -6,6 +6,7 @@
 import { achievements } from "./domains/achievements";
 import { analytics } from "./domains/analytics";
 import { asyncMatch } from "./domains/async-match";
+import { createAuthApi } from "./domains/auth";
 import { battlePass } from "./domains/battle-pass";
 import { codes } from "./domains/codes";
 import { compliance } from "./domains/compliance";
@@ -87,10 +88,22 @@ export function createClient(options: ClientOptions) {
   if (options.autoStart !== false) outbox.start();
 
   const ctx: Ctx = { request: transport.request, outbox, auth };
+  // Player accounts & login (BE-18) — email/password over the triggair-players project, then the
+  // worker session-exchange. Additive: anonymous play (login/logout/recover below) is unchanged.
+  const authApi = createAuthApi({
+    request: transport.request,
+    fetchImpl,
+    key: options.key,
+    identity: auth,
+    storage,
+    namespace,
+  });
 
   return {
     /** Ensure a player session (mint/refresh a token) → the player id. */
     login: auth.login,
+    /** Player accounts: signUp / signInWithPassword / resolveMerge / signOut / onIdentityChanged. */
+    auth: authApi,
     /** Drop the cached token (keeps the device identity). */
     logout: auth.logout,
     /** Consume a recovery code → same player on this device. */
