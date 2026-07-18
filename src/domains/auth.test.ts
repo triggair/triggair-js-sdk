@@ -5,7 +5,9 @@ import { memoryStorage } from "../storage";
 const SB = "https://players.supabase.co";
 
 /** A fake players-GoTrue + worker. `sessionOutcome` lets a test choose what /session returns. */
-function server(opts: { sessionOutcome?: "linked" | "conflict" | "created" } = {}) {
+function server(
+  opts: { sessionOutcome?: "linked" | "conflict" | "created"; providers?: string[] } = {},
+) {
   const calls: { url: string; bearer: string | null; body: unknown }[] = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
     const u = new URL(String(url));
@@ -17,7 +19,12 @@ function server(opts: { sessionOutcome?: "linked" | "conflict" | "created" } = {
 
     // worker
     if (u.pathname === "/v1/players/auth-config")
-      return j({ supabase_url: SB, anon_key: "ANON", providers: ["password"] });
+      return j({
+        supabase_url: SB,
+        anon_key: "ANON",
+        oauth_callback: "https://triggair.com/auth/callback",
+        providers: opts.providers ?? ["password"],
+      });
     if (u.pathname === "/v1/players/anonymous")
       return j({ player_id: "anon_p", token: "ANONTK", expires_in: 86_400 });
     if (u.pathname === "/v1/players/session") {
@@ -102,12 +109,74 @@ describe("tg.auth (player accounts)", () => {
     let fired = 0;
     tg.auth.onIdentityChanged(() => fired++);
     const devBefore = storage.get("tg:tg_pk_test:device");
+    expect(tg.auth.isSignedIn()).toBe(false);
     await tg.auth.signInWithPassword("a@b.com", "pw123456");
+    expect(tg.auth.isSignedIn()).toBe(true);
     await tg.auth.signOut();
+    expect(tg.auth.isSignedIn()).toBe(false);
     expect(fired).toBe(2);
     // device rotated → next anonymous login is a fresh player
     const devAfter = storage.get("tg:tg_pk_test:device");
     expect(devAfter).not.toBe(devBefore);
+  });
+
+  it("signInWithGoogle opens a popup, exchanges the callback session, and adopts the player", async () => {
+    const s = server({ providers: ["google"] });
+    const storage = memoryStorage();
+    // Fake the browser popup + postMessage plumbing on globalThis.
+    const listeners: ((e: unknown) => void)[] = [];
+    const popup = { closed: false, close: () => {} };
+    const g = globalThis as unknown as Record<string, unknown>;
+    const saved = {
+      open: g.open,
+      location: g.location,
+      addEventListener: g.addEventListener,
+      removeEventListener: g.removeEventListener,
+    };
+    let openedUrl = "";
+    g.open = (url: string) => {
+      openedUrl = url;
+      // The callback delivers the session on the next tick.
+      setTimeout(() => {
+        for (const l of listeners)
+          l({
+            origin: "https://triggair.com",
+            source: popup,
+            data: { type: "tg-oauth", access_token: "GAT", refresh_token: "GRT" },
+          });
+      }, 0);
+      return popup;
+    };
+    g.location = { origin: "https://game.example" };
+    g.addEventListener = (_t: string, cb: (e: unknown) => void) => listeners.push(cb);
+    g.removeEventListener = () => {};
+    try {
+      const tg = make(s, storage);
+      const r = await tg.auth.signInWithGoogle();
+      expect(r).toMatchObject({ playerId: "acct_p", outcome: "linked" });
+      expect(openedUrl).toContain("/auth/v1/authorize?provider=google");
+      // redirect_to is a nested URL, so the game origin is double-encoded; decode twice to check.
+      const decoded = decodeURIComponent(decodeURIComponent(openedUrl));
+      expect(decoded).toContain("https://triggair.com/auth/callback?origin=https://game.example");
+      // the session-exchange used the Google access token
+      expect(s.calls.find((c) => c.url === "/v1/players/session")?.bearer).toBe("Bearer GAT");
+    } finally {
+      Object.assign(g, saved);
+    }
+  });
+
+  it("signInWithGoogle rejects when the provider is not enabled", async () => {
+    const s = server({ providers: ["password"] });
+    const g = globalThis as unknown as Record<string, unknown>;
+    const saved = { open: g.open, location: g.location, addEventListener: g.addEventListener };
+    g.open = () => ({ closed: false, close: () => {} });
+    g.location = { origin: "https://game.example" };
+    g.addEventListener = () => {};
+    try {
+      await expect(make(s).auth.signInWithGoogle()).rejects.toThrow(/not enabled/i);
+    } finally {
+      Object.assign(g, saved);
+    }
   });
 
   it("after login, player-scoped calls use the adopted account token (no anonymous mint)", async () => {

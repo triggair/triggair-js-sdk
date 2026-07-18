@@ -223,6 +223,7 @@ only a credential: every other SDK call still uses the same per-game player toke
 - `providers()` → `string[]` (`["password"]` when enabled, `[]` when off — hide the login UI if empty)
 - `signUp(email, password)` → `{ needsConfirmation }` (emails a confirmation link)
 - `signInWithPassword(email, password)` → `{ playerId, outcome, merge? }`
+- `signInWithGoogle()` → `{ playerId, outcome, merge? }` — popup OAuth via one Triggair-hosted callback (no per-game redirect URI). **Call from a click handler** (browsers block popups without a user gesture); rejects if the popup is closed/blocked. Same outcomes + merge as password.
 - `resolveMerge("keep_account" | "use_anonymous")` → `{ playerId }` (only after an `outcome: "conflict"`)
 - `sendPasswordReset(email)` → emails a reset link
 - `signOut()` → clears the session and rotates to a **fresh anonymous** player

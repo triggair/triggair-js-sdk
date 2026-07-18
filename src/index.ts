@@ -10,6 +10,7 @@ export { memoryStorage } from "./storage";
 export type { KVStorage } from "./storage";
 
 // Domain result/input types (for consumers typing their own code).
+export type * from "./domains/auth";
 export type * from "./domains/players";
 export type * from "./domains/stats";
 export type * from "./domains/saves";

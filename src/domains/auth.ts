@@ -17,6 +17,7 @@ interface KV {
 interface AuthConfig {
   supabase_url: string | null;
   anon_key: string | null;
+  oauth_callback: string | null;
   providers: string[];
 }
 interface SessionResult {
@@ -121,20 +122,28 @@ export function createAuthApi(o: {
     })) as SessionResult;
   }
 
+  // A token (re)mint for a logged-in player: refresh the Supabase session, then re-exchange it for a
+  // fresh player token — so the account survives the 24h token expiry AND a page reload (this is
+  // re-armed at init below when a stored session exists), instead of falling back to anonymous.
+  async function reexchange(): Promise<Minted> {
+    const cur = loadSb();
+    if (!cur) throw new Error("No account session to refresh.");
+    const refreshed = await goTrue<SbSession>("/auth/v1/token?grant_type=refresh_token", {
+      refresh_token: cur.refresh_token,
+    });
+    storeSb(refreshed);
+    const s = await sessionExchange(refreshed.access_token);
+    return { player_id: s.player_id, token: s.token, expires_in: s.expires_in };
+  }
+
+  // Restore a persisted session on construction, so a reload keeps the player signed in.
+  if (loadSb()) o.identity.setReexchange(reexchange);
+
   // Adopt a Supabase session → a player token, and wire the re-exchange so a later token (re)mint
   // refreshes the Supabase session instead of falling back to anonymous.
   async function adoptSession(sb: SbSession): Promise<LoginResult> {
     storeSb(sb);
-    o.identity.setReexchange(async (): Promise<Minted> => {
-      const cur = loadSb();
-      if (!cur) throw new Error("No account session to refresh.");
-      const refreshed = await goTrue<SbSession>("/auth/v1/token?grant_type=refresh_token", {
-        refresh_token: cur.refresh_token,
-      });
-      storeSb(refreshed);
-      const s = await sessionExchange(refreshed.access_token);
-      return { player_id: s.player_id, token: s.token, expires_in: s.expires_in };
-    });
+    o.identity.setReexchange(reexchange);
     const s = await sessionExchange(sb.access_token);
     o.identity.adopt({ player_id: s.player_id, token: s.token, expires_in: s.expires_in });
     pendingTicket = s.outcome === "conflict" && s.merge ? s.merge.ticket : null;
@@ -156,6 +165,22 @@ export function createAuthApi(o: {
   return {
     /** Providers this game offers players (empty ⇒ accounts off; hide the login UI). */
     providers: async (): Promise<string[]> => (await config()).providers,
+    /** True if a player is currently signed in with an account (survives reloads). */
+    isSignedIn: (): boolean => loadSb() !== null,
+    /** The signed-in player's email (decoded from the session), or null. Best-effort, unverified. */
+    email: (): string | null => {
+      const sb = loadSb();
+      if (!sb) return null;
+      try {
+        const seg = sb.access_token.split(".")[1] ?? "";
+        const b64 = seg.replace(/-/g, "+").replace(/_/g, "/");
+        const pad = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+        const claims = JSON.parse(atob(pad)) as { email?: string };
+        return typeof claims.email === "string" ? claims.email : null;
+      } catch {
+        return null;
+      }
+    },
     /** Register email/password. With email confirmation on (default), returns { needsConfirmation }. */
     signUp: async (email: string, password: string): Promise<{ needsConfirmation: boolean }> => {
       const r = await goTrue<{ access_token?: string }>("/auth/v1/signup", { email, password });
@@ -166,6 +191,57 @@ export function createAuthApi(o: {
       goTrue<SbSession>("/auth/v1/token?grant_type=password", { email, password }).then(
         adoptSession,
       ),
+    /** Sign in with Google via a popup + the centralized OAuth callback (BE-19). Must be called from
+     *  a user gesture (click) or the browser blocks the popup. Resolves like signInWithPassword. */
+    signInWithGoogle: async (): Promise<LoginResult> => {
+      const g = globalThis as typeof globalThis & { open?: typeof window.open };
+      if (typeof g.open !== "function" || typeof g.location === "undefined")
+        throw new Error("signInWithGoogle requires a browser environment.");
+      const c = await config();
+      if (!c.supabase_url || !c.oauth_callback)
+        throw new Error("Google sign-in is not configured for this game.");
+      if (!c.providers.includes("google"))
+        throw new Error("Google sign-in is not enabled for this game.");
+      const callbackOrigin = new URL(c.oauth_callback).origin;
+      const redirectTo = `${c.oauth_callback}?origin=${encodeURIComponent(g.location.origin)}`;
+      const url = `${c.supabase_url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`;
+      const popup = g.open(url, "tg-google-signin", "width=480,height=720,menubar=no,toolbar=no");
+      if (!popup) throw new Error("Popup blocked — call signInWithGoogle() from a click handler.");
+
+      const session = await new Promise<SbSession>((resolve, reject) => {
+        const cleanup = () => {
+          g.removeEventListener("message", onMsg);
+          g.clearInterval(poll);
+        };
+        const onMsg = (e: MessageEvent) => {
+          if (e.origin !== callbackOrigin || e.source !== popup) return; // only our callback popup
+          const d = e.data as {
+            type?: string;
+            access_token?: string;
+            refresh_token?: string;
+            error?: string;
+          };
+          if (d?.type === "tg-oauth" && d.access_token) {
+            cleanup();
+            resolve({ access_token: d.access_token, refresh_token: d.refresh_token ?? "" });
+          } else if (d?.type === "tg-oauth-error") {
+            cleanup();
+            reject(new Error(d.error || "Google sign-in failed."));
+          }
+        };
+        g.addEventListener("message", onMsg);
+        // Reject if the user closes the popup without finishing.
+        const poll = g.setInterval(() => {
+          if (popup.closed) {
+            cleanup();
+            reject(new Error("Sign-in was cancelled."));
+          }
+        }, 500);
+      });
+      const r = await adoptSession(session);
+      popup.close();
+      return r;
+    },
     /** Email a password-reset link. */
     sendPasswordReset: async (email: string): Promise<void> => {
       await goTrue("/auth/v1/recover", { email });
