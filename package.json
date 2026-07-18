@@ -1,6 +1,6 @@
 {
   "name": "@triggair/sdk",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "The one-import browser client for the Triggair game backend — typed, anonymous-first, offline-resilient.",
   "license": "MIT",
   "type": "module",

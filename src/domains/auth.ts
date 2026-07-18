@@ -199,9 +199,11 @@ export function createAuthApi(o: {
       password: string,
       opts?: { emailRedirectTo?: string },
     ): Promise<{ needsConfirmation: boolean }> => {
+      // `data` → the account's user_metadata. tg_game_key (the public key) lets the worker's Send
+      // Email Hook resolve which game this signup belongs to, so it renders that game's email template.
       const r = await goTrue<{ access_token?: string }>(
         `/auth/v1/signup${emailRedirectQuery(opts)}`,
-        { email, password },
+        { email, password, data: { tg_game_key: o.key } },
       );
       return { needsConfirmation: !r.access_token };
     },

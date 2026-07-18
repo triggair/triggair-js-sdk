@@ -78,9 +78,14 @@ describe("tg.auth (player accounts)", () => {
     expect(await make(s).auth.providers()).toEqual(["password"]);
   });
 
-  it("signUp with email confirmation on returns needsConfirmation", async () => {
+  it("signUp with email confirmation on returns needsConfirmation, carrying the game key", async () => {
     const s = server();
     expect(await make(s).auth.signUp("a@b.com", "pw123456")).toEqual({ needsConfirmation: true });
+    const call = s.calls.find((c) => c.url.startsWith("/auth/v1/signup"));
+    // the game pk rides along as user_metadata so the email hook can resolve the game
+    expect((call?.body as { data?: { tg_game_key?: string } })?.data?.tg_game_key).toBe(
+      "tg_pk_test",
+    );
   });
 
   it("signUp defaults the confirm-link redirect to the current game page", async () => {
