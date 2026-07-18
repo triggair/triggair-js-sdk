@@ -6,7 +6,11 @@ const SB = "https://players.supabase.co";
 
 /** A fake players-GoTrue + worker. `sessionOutcome` lets a test choose what /session returns. */
 function server(
-  opts: { sessionOutcome?: "linked" | "conflict" | "created"; providers?: string[] } = {},
+  opts: {
+    sessionOutcome?: "linked" | "conflict" | "created";
+    providers?: string[];
+    passwordFails?: boolean;
+  } = {},
 ) {
   const calls: { url: string; bearer: string | null; body: unknown }[] = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -46,7 +50,9 @@ function server(
 
     // GoTrue (players project)
     if (u.pathname === "/auth/v1/token" && u.search.includes("grant_type=password"))
-      return j({ access_token: "AT", refresh_token: "RT" });
+      return opts.passwordFails
+        ? j({ error_description: "Invalid login credentials" }, 400)
+        : j({ access_token: "AT", refresh_token: "RT" });
     if (u.pathname === "/auth/v1/token" && u.search.includes("grant_type=refresh_token"))
       return j({ access_token: "AT2", refresh_token: "RT2" });
     if (u.pathname === "/auth/v1/signup") return j({}); // confirmation required (no session)
@@ -174,6 +180,68 @@ describe("tg.auth (player accounts)", () => {
     g.addEventListener = () => {};
     try {
       await expect(make(s).auth.signInWithGoogle()).rejects.toThrow(/not enabled/i);
+    } finally {
+      Object.assign(g, saved);
+    }
+  });
+
+  it("restores a persisted account session on construction (reload) and re-exchanges — not anonymous", async () => {
+    const s = server();
+    const storage = memoryStorage();
+    storage.set("tg:tg_pk_test:sb", JSON.stringify({ access_token: "OLD", refresh_token: "RT" }));
+    const tg = make(s, storage); // construction arms the re-exchange from the persisted session
+    await tg.players.me(); // a player-scoped call → token minted via re-exchange, not anonymous
+    expect(s.calls.find((c) => c.url === "/v1/players/me")?.bearer).toBe("Bearer ACCTTK");
+    expect(s.calls.some((c) => c.url.startsWith("/auth/v1/token?grant_type=refresh_token"))).toBe(
+      true,
+    );
+    expect(s.calls.some((c) => c.url === "/v1/players/anonymous")).toBe(false);
+    expect(tg.auth.isSignedIn()).toBe(true);
+  });
+
+  it("signInWithPassword surfaces GoTrue's error message on bad credentials", async () => {
+    await expect(
+      make(server({ passwordFails: true })).auth.signInWithPassword("a@b.com", "wrong"),
+    ).rejects.toThrow(/invalid login credentials/i);
+  });
+
+  it("signInWithGoogle ignores a forged wrong-origin message and rejects when the popup closes", async () => {
+    const s = server({ providers: ["google"] });
+    const popup = { closed: false, close: () => {} };
+    const g = globalThis as unknown as Record<string, unknown>;
+    const saved = {
+      open: g.open,
+      location: g.location,
+      addEventListener: g.addEventListener,
+      removeEventListener: g.removeEventListener,
+    };
+    const listeners: ((e: unknown) => void)[] = [];
+    g.location = { origin: "https://game.example" };
+    g.addEventListener = (_t: string, cb: (e: unknown) => void) => listeners.push(cb);
+    g.removeEventListener = (_t: string, cb: (e: unknown) => void) => {
+      const i = listeners.indexOf(cb);
+      if (i >= 0) listeners.splice(i, 1);
+    };
+    g.open = () => {
+      // A rogue frame forges a tg-oauth message from the WRONG origin — must be ignored.
+      setTimeout(() => {
+        for (const l of listeners)
+          l({
+            origin: "https://evil.example",
+            source: popup,
+            data: { type: "tg-oauth", access_token: "STOLEN" },
+          });
+      }, 0);
+      return popup;
+    };
+    try {
+      const p = make(s, memoryStorage()).auth.signInWithGoogle();
+      setTimeout(() => {
+        popup.closed = true;
+      }, 20); // no valid message ever arrives → the poll detects the close
+      // If the forged message were accepted, this would RESOLVE with STOLEN; instead it rejects.
+      await expect(p).rejects.toThrow(/cancelled/i);
+      expect(s.calls.some((c) => c.url === "/v1/players/session")).toBe(false); // never exchanged STOLEN
     } finally {
       Object.assign(g, saved);
     }

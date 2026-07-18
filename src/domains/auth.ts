@@ -203,7 +203,9 @@ export function createAuthApi(o: {
       if (!c.providers.includes("google"))
         throw new Error("Google sign-in is not enabled for this game.");
       const callbackOrigin = new URL(c.oauth_callback).origin;
-      const redirectTo = `${c.oauth_callback}?origin=${encodeURIComponent(g.location.origin)}`;
+      // Pass the game origin AND the pk so the callback can verify (server-side) that this origin is in
+      // the game's allowlist before it releases the session — an attacker can't redirect it elsewhere.
+      const redirectTo = `${c.oauth_callback}?origin=${encodeURIComponent(g.location.origin)}&key=${encodeURIComponent(o.key)}`;
       const url = `${c.supabase_url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`;
       const popup = g.open(url, "tg-google-signin", "width=480,height=720,menubar=no,toolbar=no");
       if (!popup) throw new Error("Popup blocked — call signInWithGoogle() from a click handler.");
