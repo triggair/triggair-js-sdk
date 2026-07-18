@@ -73,6 +73,22 @@ const { code } = await tg.mintRecoveryCode(); // show/share this once
 await tg.recover(code); // same player, new token
 ```
 
+## Player accounts (optional login)
+
+Durable email/password login on top of anonymous-first, so a player keeps the same
+player across devices. Off by default; enable per game in the dashboard (Setup →
+Keys → Player accounts). Anonymous play always works.
+
+```ts
+if ((await tg.auth.providers()).includes("password")) {
+  const r = await tg.auth.signInWithPassword(email, password);
+  // outcome: 'linked' (kept this device's progress) | 'resumed' | 'created' | 'conflict'
+  if (r.outcome === "conflict") await tg.auth.resolveMerge("keep_account"); // or 'use_anonymous'
+  tg.auth.onIdentityChanged(() => refetchEverything());
+}
+await tg.auth.signOut(); // back to a fresh anonymous player
+```
+
 ## Errors
 
 Every method throws a `TriggairError` on failure:
@@ -117,4 +133,4 @@ server. Every group returns typed results with the same `TriggairError` contract
 **Platform** `tg.storage` · `tg.rng`
 
 Plus the top-level helpers: `tg.login/logout/recover/mintRecoveryCode`,
-`tg.track`, `tg.flush`, `tg.stop`, `tg.playerId`.
+`tg.auth` (optional player accounts), `tg.track`, `tg.flush`, `tg.stop`, `tg.playerId`.

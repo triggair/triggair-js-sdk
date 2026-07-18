@@ -73,7 +73,9 @@ secret key, stop and get the publishable one from the dashboard.
    anonymous player token (bound to a random device id in `localStorage`) and silently
    refreshes it. There is **no login wall**. `await tg.login()` just forces the mint early and
    returns `{ playerId }`. To move an account to a new device, use
-   `tg.mintRecoveryCode()` → `tg.recover(code)`.
+   `tg.mintRecoveryCode()` → `tg.recover(code)`. **Optional durable login** (email/password,
+   opt-in per game) lives on `tg.auth` — see the Player accounts section; it is a credential
+   layer on top of this same player token, not a separate identity.
 
 2. **`pk` calls vs `player` calls.** Read-only/public calls (leaderboard `top`, `config`,
    `flags`, `ugc.browse`, `resolveShare`, `compliance.policy`) work with just the publishable
@@ -181,6 +183,7 @@ when there is no `localStorage`, and its internal flush timer is `unref`'d, so a
 | `tg.logout(): void` | Drop the cached token (keeps device identity). |
 | `tg.mintRecoveryCode(): Promise<{ code, expires_at }>` | Mint a single-use cross-device rescue code. |
 | `tg.recover(code): Promise<{ playerId }>` | Consume a recovery code on this device → same player. |
+| `tg.auth` | Optional player accounts (email/password login across devices). See the Player accounts section. |
 | `tg.playerId: string \| null` | The current player id (or null before first login). |
 | `tg.track(name, count?): void` | Queue a durable, coalesced count event (offline-safe). |
 | `tg.flush(): Promise<void>` | Flush the durable outbox now. |
@@ -210,6 +213,36 @@ handle is lowercased and must be 3–20 chars of `a–z 0–9 _`.
 ```ts
 const me = await tg.players.me();
 if (!me.display_name) await tg.players.updateProfile({ display_name: "Ada" });
+```
+
+### Player accounts — `tg.auth` (optional, opt-in per game)
+Durable email/password login on top of anonymous-first, so a player keeps the SAME player
+across devices. **Off by default**; enable per game in the dashboard (Setup → Keys → Player
+accounts). Anonymous play always works — accounts are an upgrade, never a wall. The account is
+only a credential: every other SDK call still uses the same per-game player token.
+- `providers()` → `string[]` (`["password"]` when enabled, `[]` when off — hide the login UI if empty)
+- `signUp(email, password)` → `{ needsConfirmation }` (emails a confirmation link)
+- `signInWithPassword(email, password)` → `{ playerId, outcome, merge? }`
+- `resolveMerge("keep_account" | "use_anonymous")` → `{ playerId }` (only after an `outcome: "conflict"`)
+- `sendPasswordReset(email)` → emails a reset link
+- `signOut()` → clears the session and rotates to a **fresh anonymous** player
+- `onIdentityChanged(cb)` → `() => void` unsubscribe; fires whenever the active player id switches
+
+**`outcome`** tells you what happened: `linked` (first sign-in carried THIS device's anonymous
+progress into the account) · `resumed`/`adopted` (returned the account's existing player) ·
+`created` (fresh account, no local progress) · `conflict` (the account AND this device both
+have save data — you must pick). On `conflict` the response has a `merge` block; call
+`resolveMerge`: `keep_account` keeps the account's data, `use_anonymous` replaces it with this
+device's progress. The losing player is **parked, never deleted** (support can restore it), so
+never silently discard — show the choice. Any `outcome` may switch the active player id, so
+refetch player-scoped data (wire `onIdentityChanged`).
+
+```ts
+if ((await tg.auth.providers()).includes("password")) {
+  const r = await tg.auth.signInWithPassword(email, password);
+  if (r.outcome === "conflict") await tg.auth.resolveMerge("keep_account"); // or "use_anonymous"
+  tg.auth.onIdentityChanged(() => refetchEverything());
+}
 ```
 
 ### Stats — `tg.stats` (player)
