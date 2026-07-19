@@ -92,7 +92,7 @@ export function createClient(options: ClientOptions) {
   // worker session-exchange. Additive: anonymous play (login/logout/recover below) is unchanged.
   const authApi = createAuthApi({
     request: transport.request,
-    fetchImpl,
+    apiBase: options.apiBase ?? DEFAULT_API,
     key: options.key,
     identity: auth,
     storage,

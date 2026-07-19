@@ -1,9 +1,9 @@
-// Player accounts & login (BE-18 / design-doc 016). The credential layer is a dedicated Supabase
-// (triggair-players) project; this module drives its GoTrue REST directly (zero deps) for
-// email/password, then exchanges the session with the worker's POST /v1/players/session for the usual
-// per-game player token. First login LINKS the current anonymous player; a real conflict returns a
-// `merge` choice (keep the account's data, or replace it with the anonymous progress). The account
-// survives the 24h player-token expiry via a re-exchange wired into identity. Anonymous stays default.
+// Player accounts & login (BE-18, BE-21). Every credential call goes through the Triggair worker —
+// signup, password login, token refresh, password reset, logout, and the Google OAuth start — so the
+// SDK only ever talks to api.triggair.com; the identity provider is never contacted or named here. The
+// worker returns the account session (kept client-side, in storage) AND the per-game player token. A
+// first login LINKS the current anonymous player; a real conflict returns a `merge` choice. The login
+// survives token/session expiry via a re-exchange wired into identity. Anonymous stays the default.
 import type { Auth, Minted } from "../identity";
 import type { RequestSpec } from "../transport";
 
@@ -15,22 +15,21 @@ interface KV {
 }
 
 interface AuthConfig {
-  supabase_url: string | null;
-  anon_key: string | null;
-  oauth_callback: string | null;
   providers: string[];
+  oauth_callback: string | null;
 }
-interface SessionResult {
+interface AccountSession {
+  access_token: string;
+  refresh_token: string;
+}
+interface ExchangeResult {
   player_id: string;
   token: string;
   expires_in: number;
   outcome: string;
   merge?: { ticket: string; account_player: { id: string }; anonymous_player: { id: string } };
 }
-interface SbSession {
-  access_token: string;
-  refresh_token: string;
-}
+type LoginResponse = ExchangeResult & { session: AccountSession };
 
 export interface LoginResult {
   playerId: string;
@@ -42,7 +41,7 @@ export interface LoginResult {
 
 export function createAuthApi(o: {
   request: Requester;
-  fetchImpl: typeof fetch;
+  apiBase: string;
   key: string;
   identity: Auth;
   storage: KV;
@@ -55,6 +54,8 @@ export function createAuthApi(o: {
   const fire = () => {
     for (const l of listeners) l();
   };
+  const post = <T>(path: string, body: unknown, bearer?: string): Promise<T | undefined> =>
+    o.request<T>({ method: "POST", path, auth: "pk", body, ...(bearer ? { bearer } : {}) });
 
   async function config(): Promise<AuthConfig> {
     if (!cfg)
@@ -66,15 +67,15 @@ export function createAuthApi(o: {
     return cfg;
   }
 
-  function loadSb(): SbSession | null {
+  function loadSb(): AccountSession | null {
     try {
       const raw = o.storage.get(`${ns}sb`);
-      return raw ? (JSON.parse(raw) as SbSession) : null;
+      return raw ? (JSON.parse(raw) as AccountSession) : null;
     } catch {
       return null;
     }
   }
-  function storeSb(s: SbSession | null): void {
+  function storeSb(s: AccountSession | null): void {
     if (s)
       o.storage.set(
         `${ns}sb`,
@@ -83,89 +84,54 @@ export function createAuthApi(o: {
     else o.storage.remove(`${ns}sb`);
   }
 
-  // Where GoTrue should send the player after they click a confirm/reset link. Without this the link
-  // lands on the players project's site_url (triggair.com) instead of the game. Defaults to the
-  // current game page; an explicit value must be in the players project's uri_allow_list or GoTrue
-  // ignores it and falls back to site_url (so a non-allowlisted dev origin is no worse than before).
-  function emailRedirectQuery(opts?: { emailRedirectTo?: string }): string {
+  // Where the confirm/reset email link should land — defaults to the current game page. Must be one of
+  // the game's allowlisted origins, else the link falls back to triggair.com.
+  function emailRedirect(opts?: { emailRedirectTo?: string }): string | undefined {
     const loc = (globalThis as { location?: { origin: string; pathname: string } }).location;
-    const to = opts?.emailRedirectTo ?? (loc ? `${loc.origin}${loc.pathname}` : undefined);
-    return to ? `?redirect_to=${encodeURIComponent(to)}` : "";
+    return opts?.emailRedirectTo ?? (loc ? `${loc.origin}${loc.pathname}` : undefined);
   }
 
-  // A GoTrue call against the triggair-players project (apikey = its public anon key).
-  async function goTrue<T>(path: string, body: unknown, accessToken?: string): Promise<T> {
-    const c = await config();
-    if (!c.supabase_url || !c.anon_key)
-      throw new Error("Player accounts are not enabled for this game.");
-    const res = await o.fetchImpl(`${c.supabase_url}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: c.anon_key,
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : {};
-    if (!res.ok)
-      throw new Error(
-        String(
-          data.error_description ||
-            data.msg ||
-            data.message ||
-            data.error ||
-            `auth error ${res.status}`,
-        ),
-      );
-    return data as T;
+  // Exchange an account session (Bearer) for a player token — used by the Google callback flow.
+  async function exchangeSession(accessToken: string): Promise<ExchangeResult> {
+    return (await post<ExchangeResult>(
+      "/v1/players/session",
+      { device_id: o.identity.deviceId() },
+      accessToken,
+    )) as ExchangeResult;
   }
 
-  async function sessionExchange(accessToken: string): Promise<SessionResult> {
-    return (await o.request<SessionResult>({
-      method: "POST",
-      path: "/v1/players/session",
-      auth: "pk",
-      bearer: accessToken,
-      body: { device_id: o.identity.deviceId() },
-    })) as SessionResult;
-  }
-
-  // A token (re)mint for a logged-in player: refresh the Supabase session, then re-exchange it for a
-  // fresh player token — so the account survives the 24h token expiry AND a page reload (this is
-  // re-armed at init below when a stored session exists), instead of falling back to anonymous.
+  // A token (re)mint for a logged-in player: refresh the account session AND re-mint the player token
+  // in one worker call — so the account survives the 24h token expiry AND a reload (re-armed at init).
   async function reexchange(): Promise<Minted> {
     const cur = loadSb();
     if (!cur) throw new Error("No account session to refresh.");
-    const refreshed = await goTrue<SbSession>("/auth/v1/token?grant_type=refresh_token", {
+    const res = (await post<LoginResponse>("/v1/players/token/refresh", {
       refresh_token: cur.refresh_token,
-    });
-    storeSb(refreshed);
-    const s = await sessionExchange(refreshed.access_token);
-    return { player_id: s.player_id, token: s.token, expires_in: s.expires_in };
+      device_id: o.identity.deviceId(),
+    })) as LoginResponse;
+    storeSb(res.session);
+    return { player_id: res.player_id, token: res.token, expires_in: res.expires_in };
   }
 
   // Restore a persisted session on construction, so a reload keeps the player signed in.
   if (loadSb()) o.identity.setReexchange(reexchange);
 
-  // Adopt a Supabase session → a player token, and wire the re-exchange so a later token (re)mint
-  // refreshes the Supabase session instead of falling back to anonymous.
-  async function adoptSession(sb: SbSession): Promise<LoginResult> {
-    storeSb(sb);
+  // Adopt an account session + its exchange result: store the session, wire re-exchange, adopt the
+  // player token, and surface any merge conflict.
+  function adopt(session: AccountSession | null, r: ExchangeResult): LoginResult {
+    if (session) storeSb(session);
     o.identity.setReexchange(reexchange);
-    const s = await sessionExchange(sb.access_token);
-    o.identity.adopt({ player_id: s.player_id, token: s.token, expires_in: s.expires_in });
-    pendingTicket = s.outcome === "conflict" && s.merge ? s.merge.ticket : null;
+    o.identity.adopt({ player_id: r.player_id, token: r.token, expires_in: r.expires_in });
+    pendingTicket = r.outcome === "conflict" && r.merge ? r.merge.ticket : null;
     fire();
     return {
-      playerId: s.player_id,
-      outcome: s.outcome,
-      ...(s.merge
+      playerId: r.player_id,
+      outcome: r.outcome,
+      ...(r.merge
         ? {
             merge: {
-              accountPlayerId: s.merge.account_player.id,
-              anonymousPlayerId: s.merge.anonymous_player.id,
+              accountPlayerId: r.merge.account_player.id,
+              anonymousPlayerId: r.merge.anonymous_player.id,
             },
           }
         : {}),
@@ -192,46 +158,58 @@ export function createAuthApi(o: {
       }
     },
     /** Register email/password. With email confirmation on (default), returns { needsConfirmation };
-     *  the confirmation link returns the player to `emailRedirectTo` (defaults to the current game
-     *  page) — it must be in the game's allowlisted origins, else it falls back to triggair.com. */
+     *  if a session is issued immediately the player is signed in. `emailRedirectTo` (default: the
+     *  current game page) is where the confirmation link lands — it must be an allowlisted origin. */
     signUp: async (
       email: string,
       password: string,
       opts?: { emailRedirectTo?: string },
     ): Promise<{ needsConfirmation: boolean }> => {
-      // `data` → the account's user_metadata. tg_game_key (the public key) lets the worker's Send
-      // Email Hook resolve which game this signup belongs to, so it renders that game's email template.
-      const r = await goTrue<{ access_token?: string }>(
-        `/auth/v1/signup${emailRedirectQuery(opts)}`,
-        { email, password, data: { tg_game_key: o.key } },
-      );
-      return { needsConfirmation: !r.access_token };
+      const res = (await post<{
+        needs_confirmation: boolean;
+        session?: AccountSession;
+        player?: ExchangeResult;
+      }>("/v1/players/signup", {
+        email,
+        password,
+        device_id: o.identity.deviceId(),
+        redirect_to: emailRedirect(opts),
+      })) as { needs_confirmation: boolean; session?: AccountSession; player?: ExchangeResult };
+      if (res.session && res.player) adopt(res.session, res.player);
+      return { needsConfirmation: res.needs_confirmation };
     },
     /** Sign in with email/password and exchange for a player token. */
-    signInWithPassword: (email: string, password: string): Promise<LoginResult> =>
-      goTrue<SbSession>("/auth/v1/token?grant_type=password", { email, password }).then(
-        adoptSession,
-      ),
-    /** Sign in with Google via a popup + the centralized OAuth callback (BE-19). Must be called from
-     *  a user gesture (click) or the browser blocks the popup. Resolves like signInWithPassword. */
+    signInWithPassword: async (email: string, password: string): Promise<LoginResult> => {
+      const res = (await post<LoginResponse>("/v1/players/login", {
+        email,
+        password,
+        device_id: o.identity.deviceId(),
+      })) as LoginResponse;
+      return adopt(res.session, res);
+    },
+    /** Sign in with Google via a popup + the centralized OAuth callback. Must be called from a user
+     *  gesture (click) or the browser blocks the popup. Resolves like signInWithPassword. */
     signInWithGoogle: async (): Promise<LoginResult> => {
       const g = globalThis as typeof globalThis & { open?: typeof window.open };
       if (typeof g.open !== "function" || typeof g.location === "undefined")
         throw new Error("signInWithGoogle requires a browser environment.");
       const c = await config();
-      if (!c.supabase_url || !c.oauth_callback)
-        throw new Error("Google sign-in is not configured for this game.");
       if (!c.providers.includes("google"))
         throw new Error("Google sign-in is not enabled for this game.");
+      if (!c.oauth_callback) throw new Error("Google sign-in is not configured for this game.");
       const callbackOrigin = new URL(c.oauth_callback).origin;
-      // Pass the game origin AND the pk so the callback can verify (server-side) that this origin is in
-      // the game's allowlist before it releases the session — an attacker can't redirect it elsewhere.
-      const redirectTo = `${c.oauth_callback}?origin=${encodeURIComponent(g.location.origin)}&key=${encodeURIComponent(o.key)}`;
-      const url = `${c.supabase_url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(redirectTo)}`;
-      const popup = g.open(url, "tg-google-signin", "width=480,height=720,menubar=no,toolbar=no");
+      // Open the WORKER start endpoint (not the identity provider); it 302s to the provider with the
+      // game origin + pk so the callback can verify (server-side) the origin is allowlisted before it
+      // releases the session — an attacker can't redirect it elsewhere.
+      const startUrl = `${o.apiBase.replace(/\/$/, "")}/v1/players/oauth/google/start?key=${encodeURIComponent(o.key)}&origin=${encodeURIComponent(g.location.origin)}`;
+      const popup = g.open(
+        startUrl,
+        "tg-google-signin",
+        "width=480,height=720,menubar=no,toolbar=no",
+      );
       if (!popup) throw new Error("Popup blocked — call signInWithGoogle() from a click handler.");
 
-      const session = await new Promise<SbSession>((resolve, reject) => {
+      const session = await new Promise<AccountSession>((resolve, reject) => {
         const cleanup = () => {
           g.removeEventListener("message", onMsg);
           g.clearInterval(poll);
@@ -261,30 +239,28 @@ export function createAuthApi(o: {
           }
         }, 500);
       });
-      const r = await adoptSession(session);
+      const r = adopt(session, await exchangeSession(session.access_token));
       popup.close();
       return r;
     },
     /** Email a password-reset link. `emailRedirectTo` (default: the current game page) is where the
-     *  link lands; it must be in the game's allowlisted origins, else it falls back to triggair.com. */
+     *  link lands; it must be an allowlisted origin, else it falls back to triggair.com. */
     sendPasswordReset: async (
       email: string,
       opts?: { emailRedirectTo?: string },
     ): Promise<void> => {
-      await goTrue(`/auth/v1/recover${emailRedirectQuery(opts)}`, { email });
+      await post("/v1/players/password-reset", { email, redirect_to: emailRedirect(opts) });
     },
     /** Resolve a login conflict: keep the account's data, or replace it with the anonymous progress. */
     resolveMerge: async (
       choice: "keep_account" | "use_anonymous",
     ): Promise<{ playerId: string }> => {
       if (!pendingTicket) throw new Error("No pending merge to resolve.");
-      const s = (await o.request<SessionResult>({
-        method: "POST",
-        path: "/v1/players/session/merge",
-        auth: "pk",
-        bearer: loadSb()?.access_token,
-        body: { ticket: pendingTicket, choice },
-      })) as SessionResult;
+      const s = (await post<ExchangeResult>(
+        "/v1/players/session/merge",
+        { ticket: pendingTicket, choice },
+        loadSb()?.access_token,
+      )) as ExchangeResult;
       pendingTicket = null;
       o.identity.adopt({ player_id: s.player_id, token: s.token, expires_in: s.expires_in });
       fire();
@@ -295,9 +271,9 @@ export function createAuthApi(o: {
       const sb = loadSb();
       if (sb) {
         try {
-          await goTrue("/auth/v1/logout", {}, sb.access_token);
+          await post("/v1/players/logout", {}, sb.access_token); // best-effort revoke
         } catch {
-          /* best-effort — the local session is cleared regardless */
+          /* the local session is cleared regardless */
         }
       }
       storeSb(null);
