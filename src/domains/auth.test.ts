@@ -203,7 +203,7 @@ describe("tg.auth (player accounts over the worker proxy)", () => {
       setTimeout(() => {
         for (const l of listeners)
           l({
-            origin: "https://triggair.com",
+            origin: "https://api.test",
             source: popup,
             data: { type: "tg-oauth", access_token: "GAT", refresh_token: "GRT" },
           });

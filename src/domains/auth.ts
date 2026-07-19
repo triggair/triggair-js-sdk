@@ -16,7 +16,6 @@ interface KV {
 
 interface AuthConfig {
   providers: string[];
-  oauth_callback: string | null;
 }
 interface AccountSession {
   access_token: string;
@@ -196,11 +195,10 @@ export function createAuthApi(o: {
       const c = await config();
       if (!c.providers.includes("google"))
         throw new Error("Google sign-in is not enabled for this game.");
-      if (!c.oauth_callback) throw new Error("Google sign-in is not configured for this game.");
-      const callbackOrigin = new URL(c.oauth_callback).origin;
-      // Open the WORKER start endpoint (not the identity provider); it 302s to the provider with the
-      // game origin + pk so the callback can verify (server-side) the origin is allowlisted before it
-      // releases the session — an attacker can't redirect it elsewhere.
+      const apiOrigin = new URL(o.apiBase).origin;
+      // The whole OAuth flow runs on the worker (PKCE): the popup starts at api.triggair.com, the
+      // worker exchanges the code server-side, and the callback (also on api.triggair.com) posts the
+      // session back. So the trusted postMessage origin is the API origin — never the provider's.
       const startUrl = `${o.apiBase.replace(/\/$/, "")}/v1/players/oauth/google/start?key=${encodeURIComponent(o.key)}&origin=${encodeURIComponent(g.location.origin)}`;
       const popup = g.open(
         startUrl,
@@ -215,7 +213,7 @@ export function createAuthApi(o: {
           g.clearInterval(poll);
         };
         const onMsg = (e: MessageEvent) => {
-          if (e.origin !== callbackOrigin || e.source !== popup) return; // only our callback popup
+          if (e.origin !== apiOrigin || e.source !== popup) return; // only our callback popup
           const d = e.data as {
             type?: string;
             access_token?: string;
